@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=ExtMon
+GenericName=External Monitor Tuner
+Comment=Brightness and tone controls for external monitors on GNOME Wayland
+Exec=extmon
+Icon=io.github.Aihuman.ExtMon
+Terminal=false
+Categories=GTK;Settings;
+Keywords=monitor;external;brightness;color;gamma;wayland;gnome;
+StartupNotify=true
