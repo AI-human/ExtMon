@@ -13,7 +13,9 @@ RGB balance).
 > output. Cross-channel color controls (saturation/vibrance/hue) are
 > therefore not part of ExtMon.
 
-By default it only touches the external monitor (`HDMI-1`); the laptop panel is left alone.
+By default it only touches the selected monitor — any connected monitor can
+be chosen (the laptop panel included). HDMI/DP outputs are preselected on
+first launch; the choice is remembered in the state file.
 
 ## Features
 
@@ -75,14 +77,21 @@ extmon-cli save "My Look"
 extmon-cli presets
 extmon-cli reset
 extmon-cli status
+extmon-cli monitors            # list connected monitors + current target
+extmon-cli monitor eDP-1       # set target monitor (persisted)
+extmon-cli -m HDMI-1 set gain 1.2   # one-shot target override
 ```
+
+Target monitor resolution order: `-m` flag → `EXTMON_CONNECTOR` env var →
+saved state → `HDMI-1`.
 
 CLI keys: `gain`/`brightness`, `contrast`, `lift`, `gamma`, `shadows`, `highlights`,
 `temp`, `red`, `green`, `blue`.
 
 ## Configuration
 
-- Target connector: `EXTMON_CONNECTOR` environment variable (default `HDMI-1`)
+- Target monitor: GUI dropdown (persisted), or for the CLI `-m NAME`,
+  `EXTMON_CONNECTOR` env var, `extmon-cli monitor <name>` (default `HDMI-1`)
 - State file: `~/.config/extmon.state.json` (shared by GUI and CLI)
 - User presets: `~/.config/extmon-presets.txt`
 

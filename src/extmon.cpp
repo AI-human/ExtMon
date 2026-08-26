@@ -51,7 +51,7 @@ static const SliderSpec SPECS[] = {
 static const int NSPEC = sizeof(SPECS)/sizeof(SPECS[0]);
 
 struct Preset { std::string name; Tuning t; bool builtin = false; size_t idx = 0; };
-struct OutputInfo { guint id = 0; int crtc = 0; std::string name; };
+struct OutputInfo { guint id = 0; int crtc = -1; std::string conn; std::string name; };
 
 static struct App {
     GtkApplication *app = nullptr;
@@ -84,24 +84,34 @@ static void tune_from_state(Tuning &t, const char *buf) {
     getnum("\"tint_b\"", &t.tint_b);
 }
 
-static Tuning load_state() {
+static Tuning load_state(std::string *monitor = nullptr) {
     Tuning t;
     char *p = state_path();
     char *buf = nullptr;
-    if (g_file_get_contents(p, &buf, nullptr, nullptr)) { tune_from_state(t, buf); g_free(buf); }
+    if (g_file_get_contents(p, &buf, nullptr, nullptr)) {
+        tune_from_state(t, buf);
+        if (monitor) {
+            const char *k = strstr(buf, "\"monitor\"");
+            if (k && (k = strchr(k, ':')) && (k = strchr(k, '"'))) {
+                for (++k; *k && *k != '"'; ++k) *monitor += *k;
+            }
+        }
+        g_free(buf);
+    }
     g_free(p);
     return t;
 }
 
-static void save_state(const Tuning &t) {
+static void save_state(const Tuning &t, const std::string &monitor) {
     char *p = state_path();
     char buf[512];
     snprintf(buf, sizeof buf,
         "{\"gain\": %.3f, \"contrast\": %.3f, \"lift\": %.3f, \"gamma\": %.3f, "
         "\"shadows\": %.3f, \"highlights\": %.3f, "
-        "\"temp\": %.3f, \"tint_r\": %.3f, \"tint_g\": %.3f, \"tint_b\": %.3f}\n",
+        "\"temp\": %.3f, \"tint_r\": %.3f, \"tint_g\": %.3f, \"tint_b\": %.3f, "
+        "\"monitor\": \"%s\"}\n",
         t.gain, t.contrast, t.lift, t.gamma, t.shadows, t.highlights,
-        t.temp, t.tint_r, t.tint_g, t.tint_b);
+        t.temp, t.tint_r, t.tint_g, t.tint_b, monitor.c_str());
     g_file_set_contents(p, buf, -1, nullptr);
     g_free(p);
 }
@@ -181,14 +191,17 @@ static void refresh_outputs() {
         OutputInfo oi;
         GVariant *v0 = g_variant_get_child_value(item, 0);
         GVariant *v2 = g_variant_get_child_value(item, 2);
+        GVariant *v4 = g_variant_get_child_value(item, 4);
         oi.id = g_variant_get_uint32(v0);
         oi.crtc = g_variant_get_int32(v2);
-        g_variant_unref(v0); g_variant_unref(v2);
+        oi.conn = g_variant_get_string(v4, nullptr);
+        g_variant_unref(v0); g_variant_unref(v2); g_variant_unref(v4);
         GVariant *props = g_variant_get_child_value(item, g_variant_n_children(item) - 1);
         char *dn = nullptr;
         g_variant_lookup(props, "display-name", "s", &dn);
         if (dn) { oi.name = dn; g_free(dn); }
-        if (oi.crtc > 0) A.outputs.push_back(oi);
+        if (oi.name.empty() || oi.name == oi.conn) oi.name = oi.conn;
+        if (oi.crtc >= 0) A.outputs.push_back(oi);
         g_variant_unref(props);
         g_variant_unref(item);
     }
@@ -277,7 +290,7 @@ static gboolean do_apply(gpointer) {
     g_dbus_proxy_call(A.proxy, "SetCrtcGamma", lut, G_DBUS_CALL_FLAGS_NONE,
         2000, nullptr, on_set_done, (gpointer)"lut");
 
-    save_state(A.cur);
+    save_state(A.cur, o->conn);
     return G_SOURCE_REMOVE;
 }
 
@@ -409,7 +422,8 @@ static void on_save_preset(GtkButton *, gpointer ud) {
 static void activate(GtkApplication *) {
     refresh_outputs();
     load_presets();
-    A.cur = load_state();
+    std::string saved_monitor;
+    A.cur = load_state(&saved_monitor);
 
     A.window = gtk_application_window_new(A.app);
     gtk_window_set_title(GTK_WINDOW(A.window), "ExtMon");
@@ -434,9 +448,14 @@ static void activate(GtkApplication *) {
     for (auto &o : A.outputs) names.push_back(o.name.c_str());
     names.push_back(nullptr);
     A.output_drop = gtk_drop_down_new_from_strings(names.data());
-    for (size_t i = 0; i < A.outputs.size(); i++)
-        if (A.outputs[i].name.rfind("HDMI", 0) == 0 || A.outputs[i].name.rfind("DP", 0) == 0)
-            gtk_drop_down_set_selected(GTK_DROP_DOWN(A.output_drop), i);
+    size_t pref = (size_t)-1;
+    for (size_t i = 0; i < A.outputs.size(); i++) {
+        if (!saved_monitor.empty() && A.outputs[i].conn == saved_monitor) { pref = i; break; }
+        if (pref == (size_t)-1 &&
+            (A.outputs[i].conn.rfind("HDMI", 0) == 0 || A.outputs[i].conn.rfind("DP", 0) == 0))
+            pref = i;
+    }
+    if (pref != (size_t)-1) gtk_drop_down_set_selected(GTK_DROP_DOWN(A.output_drop), pref);
     g_signal_connect_swapped(A.output_drop, "notify::selected", G_CALLBACK(schedule_apply), nullptr);
     GtkWidget *out_card = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
     gtk_widget_add_css_class(out_card, "card");

@@ -11,7 +11,10 @@ Usage:
   extmon.py save <Name>                         save current state as preset
   extmon.py reset                               neutral settings
   extmon.py status                              show state + live LUT check
+  extmon.py monitors                            list connected monitors
+  extmon.py monitor [NAME]                      show / set target monitor
 
+Global option (before the command): -m NAME   target a specific monitor
 Keys: gain|brightness, contrast, lift, gamma, shadows, highlights,
       temp, red, green, blue
 """
@@ -23,7 +26,6 @@ from gi.repository import Gio, GLib
 BUS = 'org.gnome.Mutter.DisplayConfig'
 PATH = '/org/gnome/Mutter/DisplayConfig'
 IFACE = 'org.gnome.Mutter.DisplayConfig'
-CONNECTOR = os.environ.get('EXTMON_CONNECTOR', 'HDMI-1')
 STATE = os.path.expanduser('~/.config/extmon.state.json')
 PRESETS = os.path.expanduser('~/.config/extmon-presets.txt')
 N = 1024
@@ -46,15 +48,43 @@ def call(method, sig, args):
     return proxy.call_sync(method, GLib.Variant(sig, args),
                            Gio.DBusCallFlags.NONE, 5000, None).unpack()
 
+def out_connector(out):
+    return out[4] if len(out) > 4 and isinstance(out[4], str) \
+        else out[-1].get('connector', '?')
+
+def connected():
+    """[(output_id, crtc, connector, display_name), ...]"""
+    serial, crtcs, outputs, modes, _, _ = call('GetResources', '()', ())
+    lst = []
+    for out in outputs:
+        props = out[-1]
+        conn = out_connector(out)
+        dn = props.get('display-name') if isinstance(props, dict) else None
+        lst.append((out[0], out[2], conn, dn or conn))
+    return lst
+
+def saved_monitor():
+    try:
+        with open(STATE) as f:
+            m = json.load(f).get('monitor')
+            if isinstance(m, str) and m: return m
+    except Exception:
+        pass
+    return None
+
+CONNECTOR = os.environ.get('EXTMON_CONNECTOR') or saved_monitor() or 'HDMI-1'
+
 def get_target():
     serial, crtcs, outputs, modes, _, _ = call('GetResources', '()', ())
     for out in outputs:
         props = out[-1]
-        if CONNECTOR in (props.get('connector'), props.get('display-name')):
-            if out[2] == 0:
+        if CONNECTOR in (out_connector(out),
+                         props.get('connector'), props.get('display-name')):
+            if out[2] < 0:
                 sys.exit(f'{CONNECTOR} has no active CRTC')
             return serial, out[2], out[0]  # serial, crtc, output id
-    sys.exit(f'{CONNECTOR} not connected')
+    names = ', '.join(out_connector(o) for o in outputs)
+    sys.exit(f'{CONNECTOR} not connected (available: {names})')
 
 def load():
     try:
@@ -67,8 +97,10 @@ def load():
     return d
 
 def save(st):
+    d = dict(st)
+    d['monitor'] = CONNECTOR
     with open(STATE, 'w') as f:
-        json.dump(st, f, indent=1)
+        json.dump(d, f, indent=1)
 
 def clamp01(v): return min(1.0, max(0.0, v))
 
@@ -132,13 +164,17 @@ def user_presets():
     return d
 
 if __name__ == '__main__':
-    if len(sys.argv) < 2 or sys.argv[1] in ('-h', '--help', 'help'):
+    argv = sys.argv[1:]
+    if len(argv) >= 2 and argv[0] == '-m':
+        CONNECTOR = argv[1]
+        argv = argv[2:]
+    if not argv or argv[0] in ('-h', '--help', 'help'):
         print(__doc__); sys.exit(0)
-    cmd = sys.argv[1]
+    cmd = argv[0]
 
     if cmd == 'set':
         st = load()
-        args = sys.argv[2:]
+        args = argv[1:]
         if len(args) < 2 or len(args) % 2:
             sys.exit('usage: extmon.py set <key> <value> [key value ...]')
         for k, v in zip(args[::2], args[1::2]):
@@ -147,23 +183,46 @@ if __name__ == '__main__':
         apply(st)
     elif cmd == 'status':
         st = load()
+        print('target:', CONNECTOR)
         print('state:', json.dumps(st, indent=None))
         serial, crtc, oid = get_target()
         cr, cg, cb = call('GetCrtcGamma', '(uu)', (serial, crtc))
         mid = len(cr) // 2
         print(f"live LUT: len={len(cr)} midpoint R,G,B = {cr[mid]},{cg[mid]},{cb[mid]}")
+    elif cmd == 'monitors':
+        src = 'env' if os.environ.get('EXTMON_CONNECTOR') else \
+              ('state' if saved_monitor() else 'default')
+        for oid, crtc, conn, dn in connected():
+            tag = 'active' if crtc >= 0 else 'inactive'
+            mark = '*' if conn == CONNECTOR else ' '
+            print(f" {mark} {conn:<10} {tag:<8}" + (f" ({dn})" if dn != conn else ""))
+        print(f"target: {CONNECTOR} (from {src})")
+    elif cmd == 'monitor':
+        if len(argv) > 1:
+            name = argv[1]
+            names = [c for _, _, c, _ in connected()]
+            if name not in names:
+                sys.exit(f'monitor "{name}" not connected (available: {", ".join(names)})')
+            try:
+                with open(STATE) as f: st = json.load(f)
+            except Exception: st = dict(DEFAULTS)
+            st['monitor'] = name
+            with open(STATE, 'w') as f: json.dump(st, f, indent=1)
+            print(f'target monitor set to {name}')
+        else:
+            print(CONNECTOR)
     elif cmd == 'presets':
         print('builtin:', ', '.join(BUILTIN))
         print('user:   ', ', '.join(user_presets()) or '(none)')
     elif cmd == 'preset':
-        name = ' '.join(sys.argv[2:])
+        name = ' '.join(argv[1:])
         st = dict(DEFAULTS)
         if name in BUILTIN: st.update(BUILTIN[name])
         elif name in user_presets(): st.update(user_presets()[name])
         else: sys.exit(f'preset "{name}" not found')
         apply(st)
     elif cmd == 'save':
-        name = ' '.join(sys.argv[2:])
+        name = ' '.join(argv[1:])
         if not name: sys.exit('usage: extmon.py save <Name>')
         st = load()
         with open(PRESETS, 'a') as f:
@@ -171,7 +230,6 @@ if __name__ == '__main__':
         print(f'saved preset "{name}"')
     elif cmd == 'reset':
         apply(dict(DEFAULTS))
-        if os.path.exists(STATE): os.remove(STATE)
         print('reset to neutral')
     else:
         print(__doc__); sys.exit(1)
